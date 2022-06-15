@@ -130,6 +130,5 @@ dmypy.json
 .pyre/
 .DS_Store
 .vscode
-data
 result
 .venv-cu11
