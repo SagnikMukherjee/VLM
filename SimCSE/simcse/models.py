@@ -93,6 +93,7 @@ def cl_init(cls, config):
     if cls.model_args.pooler_type == "cls":
         cls.mlp = MLPLayer(config)
     cls.sim = Similarity(temp=cls.model_args.temp)
+    cls.dropout = nn.Dropout(0.5)
     cls.init_weights()
 
 # TODO(sagnik) : edit this function to add the encoder here as out CLIP
@@ -112,7 +113,6 @@ def cl_forward(cls,
     mlm_labels=None,
 ):
     return_dict = return_dict if return_dict is not None else cls.config.use_return_dict
-    # input_ids.shape = 64 2 32 for both
     ori_input_ids = input_ids
     batch_size = input_ids.size(0)
     # Number of sentences in one instance
@@ -122,10 +122,7 @@ def cl_forward(cls,
     mlm_outputs = None
     # Flatten input for encoding
     input_ids = input_ids.view((-1, input_ids.size(-1))) # (bs * num_sent, len)
-    # print({0:input_ids[0], 1:input_ids[1]}) #this is same for both bert and clip
-    # input_ids.shape = 128 32
     attention_mask = attention_mask.view((-1, attention_mask.size(-1))) # (bs * num_sent len)
-    # attention_mask.shape) = 128 32 
     if token_type_ids is not None:
         token_type_ids = token_type_ids.view((-1, token_type_ids.size(-1))) # (bs * num_sent, len)
 
@@ -151,11 +148,6 @@ def cl_forward(cls,
         output_hidden_states=True if cls.pooler_type in ['avg_top2', 'avg_first_last'] else False,
         return_dict=True,
     )
-    # outputs.last_hidden_state.shape = 128,32,768 for bert
-    # and 128,32,512 for clip
-    temp_output = outputs.last_hidden_state.view((batch_size, num_sent,outputs.last_hidden_state.size(-2), outputs.last_hidden_state.size(-1)))
-    print(temp_output[0])
-    ## identical outputs
 
     ## MLM Objective is ignored for now
     # MLM auxiliary objective
@@ -175,16 +167,13 @@ def cl_forward(cls,
 
     # Pooling
     pooler_output = cls.pooler(attention_mask, outputs)
-    # pooler_output.shape 128 768 for bert 128 512 for clip
     pooler_output = pooler_output.view((batch_size, num_sent, pooler_output.size(-1))) # (bs, num_sent, hidden)
-    # print(pooler_output[0])
-    # print(pooler_output.shape)
-    # 64 2 512, 64 2 768
 
     # If using "cls", we add an extra MLP layer
     # (same as BERT's original implementation) over the representation.
     if cls.pooler_type == "cls":
-        pooler_output = cls.mlp(pooler_output)
+        pooler_output = cls.mlp(cls.dropout(pooler_output))
+    
 
     # Separate representation
     z1, z2 = pooler_output[:,0], pooler_output[:,1]

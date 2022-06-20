@@ -496,10 +496,6 @@ class CLTrainer(Trainer):
                     
                     self.lr_scheduler.step()
 
-                    # print(model.module.text_model.encoder.layers[0].self_attn.k_proj.bias.grad)
-                    # print(model.module.bert.encoder.layer[0].attention.self.key.bias.grad)
-                    # print(model)
-
                     model.zero_grad()
 
                     self.state.global_step += 1

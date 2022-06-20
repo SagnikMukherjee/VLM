@@ -28,7 +28,9 @@ from transformers import (
     EvalPrediction,
     BertModel,
     BertForPreTraining,
-    RobertaModel
+    RobertaModel,
+    CLIPProcessor,
+    CLIPTokenizer   
 )
 from transformers.tokenization_utils_base import BatchEncoding, PaddingStrategy, PreTrainedTokenizerBase
 from transformers.trainer_utils import is_main_process
@@ -336,8 +338,11 @@ def main():
         "revision": model_args.model_revision,
         "use_auth_token": True if model_args.use_auth_token else None,
     }
+    
     if model_args.tokenizer_name:
         tokenizer = AutoTokenizer.from_pretrained(model_args.tokenizer_name, **tokenizer_kwargs)
+    elif 'clip' in model_args.model_name_or_path:
+        tokenizer = CLIPTokenizer.from_pretrained(model_args.model_name_or_path, **tokenizer_kwargs)
     elif model_args.model_name_or_path:
         tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path, **tokenizer_kwargs)
     else:
@@ -347,7 +352,7 @@ def main():
         )
 
     if model_args.model_name_or_path:
-        if 'roberta' in model_args.model_name_or_path:
+        if 'clip' in model_args.model_name_or_path:
             model = RobertaForCL.from_pretrained(
                 model_args.model_name_or_path,
                 from_tf=bool(".ckpt" in model_args.model_name_or_path),
@@ -377,7 +382,7 @@ def main():
         logger.info("Training new model from scratch")
         model = AutoModelForMaskedLM.from_config(config)
 
-    model.resize_token_embeddings(len(tokenizer))
+    # model.resize_token_embeddings(len(tokenizer))
 
     # Prepare features
     column_names = datasets["train"].column_names
@@ -529,7 +534,7 @@ def main():
             return inputs, labels
 
     data_collator = default_data_collator if data_args.pad_to_max_length else OurDataCollatorWithPadding(tokenizer)
-
+    training_args.dataloader_drop_last = True
     trainer = CLTrainer(
         model=model,
         args=training_args,
