@@ -101,12 +101,14 @@ class CLTrainer(Trainer):
         def prepare(params, samples):
             return
 
-        def batcher(params, batch):
+        def batcher(params, batch, max_length=77):
             sentences = [' '.join(s) for s in batch]
             batch = self.tokenizer.batch_encode_plus(
                 sentences,
                 return_tensors='pt',
                 padding=True,
+                max_length=max_length,
+                truncation=True,
             )
             for k in batch:
                 batch[k] = batch[k].to(self.args.device)
