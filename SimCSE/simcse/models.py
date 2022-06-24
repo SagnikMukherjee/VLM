@@ -59,15 +59,17 @@ class Pooler(nn.Module):
     def __init__(self, pooler_type):
         super().__init__()
         self.pooler_type = pooler_type
-        assert self.pooler_type in ["cls", "cls_before_pooler", "avg", "avg_top2", "avg_first_last"], "unrecognized pooling type %s" % self.pooler_type
+        assert self.pooler_type in ["cls", "cls_before_pooler", "avg", "avg_top2", "avg_first_last", "clip"], "unrecognized pooling type %s" % self.pooler_type
 
     def forward(self, attention_mask, outputs):
         last_hidden = outputs.last_hidden_state
         pooler_output = outputs.pooler_output
         hidden_states = outputs.hidden_states
-
-        if self.pooler_type in ['cls_before_pooler', 'cls']:
-            return last_hidden[:, 1]
+        
+        if self.pooler_type == "clip":
+            return pooler_output
+        elif self.pooler_type in ['cls_before_pooler', 'cls']:
+            return last_hidden[:, 0]
         elif self.pooler_type == "avg":
             return ((last_hidden * attention_mask.unsqueeze(-1)).sum(1) / attention_mask.sum(-1).unsqueeze(-1))
         elif self.pooler_type == "avg_first_last":
@@ -88,12 +90,12 @@ def cl_init(cls, config):
     """
     Contrastive learning class init function.
     """
-    cls.pooler_type = cls.model_args.pooler_type
-    cls.pooler = Pooler(cls.model_args.pooler_type)
+    cls.pooler_type = cls.model_args.pooler_type if "clip" not in config.model_type else "clip"
+    cls.pooler = Pooler(cls.pooler_type)
     if cls.model_args.pooler_type == "cls":
         cls.mlp = MLPLayer(config)
     cls.sim = Similarity(temp=cls.model_args.temp)
-    cls.dropout = nn.Dropout(0.5)
+    cls.dropout = nn.Dropout(0.5 if "clip" in config.model_type else 0)
     cls.init_weights()
 
 # TODO(sagnik) : edit this function to add the encoder here as out CLIP
@@ -360,13 +362,13 @@ class BertForCL(BertPreTrainedModel):
 
 
 
-class RobertaForCL(CLIPTextModel):
+class RobertaForCL(CLIPModel):
     _keys_to_ignore_on_load_missing = [r"position_ids"]
 
     def __init__(self, config, *model_args, **model_kargs):
-        super().__init__(config.text_config)
+        super().__init__(config)
         self.model_args = model_kargs["model_args"]
-
+ 
         if self.model_args.do_mlm:
             self.lm_head = RobertaLMHead(config)
 

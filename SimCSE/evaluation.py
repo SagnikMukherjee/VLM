@@ -6,7 +6,10 @@ import argparse
 from prettytable import PrettyTable
 import torch
 import transformers
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoModel, AutoTokenizer, CLIPTokenizer, CLIPModel, AutoConfig
+from simcse.models import RobertaForCL
+from train import ModelArguments
+from simcse.models import BertForCL
 
 # Set up logger
 logging.basicConfig(format='%(asctime)s : %(message)s', level=logging.DEBUG)
@@ -50,8 +53,13 @@ def main():
     args = parser.parse_args()
     
     # Load transformers' model checkpoint
-    model = AutoModel.from_pretrained(args.model_name_or_path)
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
+    
+    if 'clip' in args.model_name_or_path:
+        tokenizer = CLIPTokenizer.from_pretrained(args.model_name_or_path)
+        model = CLIPModel.from_pretrained(args.model_name_or_path).text_model
+    else :
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
+        model = AutoModel.from_pretrained(args.model_name_or_path)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
     
@@ -82,7 +90,7 @@ def main():
     def prepare(params, samples):
         return
     
-    def batcher(params, batch, max_length=None):
+    def batcher(params, batch, max_length=77):
         # Handle rare token encoding issues in the dataset
         if len(batch) >= 1 and len(batch[0]) >= 1 and isinstance(batch[0][0], bytes):
             batch = [[word.decode('utf-8') for word in s] for s in batch]
