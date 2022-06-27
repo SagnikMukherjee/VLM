@@ -24,7 +24,7 @@ class MLPLayer(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        self.dense = nn.Linear(1280, 1280)
         self.activation = nn.Tanh()
 
     def forward(self, features, **kwargs):
@@ -95,8 +95,8 @@ def cl_init(cls, config):
     if cls.model_args.pooler_type == "cls":
         cls.mlp = MLPLayer(config)
     cls.sim = Similarity(temp=cls.model_args.temp)
-    cls.dropout = nn.Dropout(0.5 if "clip" in config.model_type else 0)
-    cls.init_weights()
+    cls.dropout = nn.Dropout(0.5)
+    # cls.init_weights()
 
 # TODO(sagnik) : edit this function to add the encoder here as out CLIP
 def cl_forward(cls,
@@ -116,15 +116,18 @@ def cl_forward(cls,
 ):
     return_dict = return_dict if return_dict is not None else cls.config.use_return_dict
     ori_input_ids = input_ids
-    batch_size = input_ids.size(0)
+    batch_size = input_ids[0].size(0)
     # Number of sentences in one instance
     # 2: pair instance; 3: pair instance with a hard negative
-    num_sent = input_ids.size(1)
+    num_sent = input_ids[0].size(1)
 
     mlm_outputs = None
     # Flatten input for encoding
-    input_ids = input_ids.view((-1, input_ids.size(-1))) # (bs * num_sent, len)
-    attention_mask = attention_mask.view((-1, attention_mask.size(-1))) # (bs * num_sent len)
+    input_ids[0] = input_ids[0].view((-1, input_ids[0].size(-1))) # (bs * num_sent, len)
+    input_ids[1] = input_ids[1].view((-1, input_ids[1].size(-1))) # (bs * num_sent, len)
+
+    attention_mask[0] = attention_mask[0].view((-1, attention_mask[0].size(-1))) # (bs * num_sent len)
+    attention_mask[1] = attention_mask[1].view((-1, attention_mask[1].size(-1))) # (bs * num_sent len)
     if token_type_ids is not None:
         token_type_ids = token_type_ids.view((-1, token_type_ids.size(-1))) # (bs * num_sent, len)
 
@@ -142,14 +145,24 @@ def cl_forward(cls,
     #     return_dict=True,
     # )
     # TODO(sagnik) : clean this code to incorporate CLIP
-    outputs = encoder(
-        input_ids,
-        attention_mask=attention_mask,
+    bertOutputs = encoder[0](
+        input_ids[0],
+        attention_mask=attention_mask[0],
         position_ids=position_ids,
         output_attentions=output_attentions,
         output_hidden_states=True if cls.pooler_type in ['avg_top2', 'avg_first_last'] else False,
         return_dict=True,
-    )
+    ).last_hidden_state[:,0]
+    clipOutputs = encoder[1](
+        input_ids[1],
+        attention_mask=attention_mask[1],
+        position_ids=position_ids,
+        output_attentions=output_attentions,
+        output_hidden_states=True if cls.pooler_type in ['avg_top2', 'avg_first_last'] else False,
+        return_dict=True,
+    ).pooler_output
+    clipOutputs = cls.dropout(clipOutputs)
+    
 
     ## MLM Objective is ignored for now
     # MLM auxiliary objective
@@ -168,13 +181,14 @@ def cl_forward(cls,
         )
 
     # Pooling
-    pooler_output = cls.pooler(attention_mask, outputs)
+    pooler_output = torch.cat((bertOutputs,clipOutputs),dim=1)
     pooler_output = pooler_output.view((batch_size, num_sent, pooler_output.size(-1))) # (bs, num_sent, hidden)
+    
 
     # If using "cls", we add an extra MLP layer
     # (same as BERT's original implementation) over the representation.
     if cls.pooler_type == "cls":
-        pooler_output = cls.mlp(cls.dropout(pooler_output))
+        pooler_output = cls.mlp(pooler_output)
     
 
     # Separate representation
@@ -213,8 +227,7 @@ def cl_forward(cls,
     if num_sent >= 3:
         z1_z3_cos = cls.sim(z1.unsqueeze(1), z3.unsqueeze(0))
         cos_sim = torch.cat([cos_sim, z1_z3_cos], 1)
-
-    labels = torch.arange(cos_sim.size(0)).long().to(cls.device)
+    labels = torch.arange(cos_sim.size(0)).long().to(encoder[0].device)
     loss_fct = nn.CrossEntropyLoss()
 
     # Calculate loss with hard negatives
@@ -223,7 +236,7 @@ def cl_forward(cls,
         z3_weight = cls.model_args.hard_negative_weight
         weights = torch.tensor(
             [[0.0] * (cos_sim.size(-1) - z1_z3_cos.size(-1)) + [0.0] * i + [z3_weight] + [0.0] * (z1_z3_cos.size(-1) - i - 1) for i in range(z1_z3_cos.size(-1))]
-        ).to(cls.device)
+        ).to(encoder[0].device)
         cos_sim = cos_sim + weights
 
     loss = loss_fct(cos_sim, labels)
@@ -246,8 +259,8 @@ def cl_forward(cls,
     return SequenceClassifierOutput(
         loss=loss,
         logits=cos_sim,
-        hidden_states=outputs.hidden_states,
-        attentions=outputs.attentions,
+        # hidden_states=outputs.hidden_states,
+        # attentions=outputs.attentions,
     )
 
 
@@ -280,26 +293,33 @@ def sentemb_forward(
     #     return_dict=True,
     # )
     # TODO(sagnik): edit code to incorporate CLIP
-    outputs = encoder(
-        input_ids,
-        attention_mask=attention_mask,
+    bertOutputs = encoder[0](
+        input_ids[0],
+        attention_mask=attention_mask[0],
         position_ids=position_ids,
         output_attentions=output_attentions,
         output_hidden_states=True if cls.pooler_type in ['avg_top2', 'avg_first_last'] else False,
         return_dict=True,
-    )
+    ).last_hidden_state[:,0]
+    clipOutputs = encoder[1](
+        input_ids[1],
+        attention_mask=attention_mask[1],
+        position_ids=position_ids,
+        output_attentions=output_attentions,
+        output_hidden_states=True if cls.pooler_type in ['avg_top2', 'avg_first_last'] else False,
+        return_dict=True,
+    ).pooler_output
+    clipOutputs = cls.dropout(clipOutputs)
 
-    pooler_output = cls.pooler(attention_mask, outputs)
+    pooler_output = torch.cat((bertOutputs,clipOutputs),dim=1)
     if cls.pooler_type == "cls" and not cls.model_args.mlp_only_train:
         pooler_output = cls.mlp(pooler_output)
 
-    if not return_dict:
-        return (outputs[0], pooler_output) + outputs[2:]
 
     return BaseModelOutputWithPoolingAndCrossAttentions(
         pooler_output=pooler_output,
-        last_hidden_state=outputs.last_hidden_state,
-        hidden_states=outputs.hidden_states,
+        # last_hidden_state=outputs.last_hidden_state,
+        # hidden_states=outputs.hidden_states,
     )
 
 
@@ -406,6 +426,65 @@ class RobertaForCL(CLIPModel):
             return cl_forward(self, self.text_model,
                 input_ids=input_ids,
                 attention_mask=attention_mask,
+                token_type_ids=token_type_ids,
+                position_ids=position_ids,
+                head_mask=head_mask,
+                inputs_embeds=inputs_embeds,
+                labels=labels,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+                mlm_input_ids=mlm_input_ids,
+                mlm_labels=mlm_labels,
+            )
+
+class ensemble(nn.Module):
+    _keys_to_ignore_on_load_missing = [r"position_ids"]
+
+    def __init__(self, config, *model_args, **model_kargs):
+        super().__init__()
+        self.model_args = model_kargs["model_args"]
+        self.bert = BertModel.from_pretrained('bert-base-uncased')
+        self.clip = CLIPModel.from_pretrained('openai/clip-vit-base-patch32')
+        self.config = config
+
+        cl_init(self, config)
+
+    def forward(self,
+        input_ids=None,
+        clip_input_ids=None,
+        attention_mask=None,
+        clip_attention_mask=None,
+        token_type_ids=None,
+        clip_token_type_ids=None,
+        position_ids=None,
+        head_mask=None,
+        inputs_embeds=None,
+        labels=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+        sent_emb=False,
+        mlm_input_ids=None,
+        mlm_labels=None,
+    ):
+        if sent_emb:
+            return sentemb_forward(self, [self.bert, self.clip.text_model],
+                input_ids=[input_ids, clip_input_ids],
+                attention_mask=[attention_mask, clip_attention_mask],
+                token_type_ids=token_type_ids,
+                position_ids=position_ids,
+                head_mask=head_mask,
+                inputs_embeds=inputs_embeds,
+                labels=labels,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+            )
+        else:
+            return cl_forward(self, [self.bert, self.clip.text_model],
+                input_ids=[input_ids, clip_input_ids],
+                attention_mask=[attention_mask, clip_attention_mask],
                 token_type_ids=token_type_ids,
                 position_ids=position_ids,
                 head_mask=head_mask,

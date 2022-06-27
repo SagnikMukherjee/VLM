@@ -11,7 +11,7 @@ import warnings
 from pathlib import Path
 import importlib.util
 from packaging import version
-from transformers import Trainer
+from transformers import Trainer, CLIPTokenizer
 from transformers.modeling_utils import PreTrainedModel
 from transformers.training_args import ParallelMode, TrainingArguments
 from transformers.utils import logging
@@ -86,6 +86,7 @@ from datetime import datetime
 from filelock import FileLock
 
 logger = logging.get_logger(__name__)
+clipTokenizer = CLIPTokenizer.from_pretrained('openai/clip-vit-base-patch32')
 
 class CLTrainer(Trainer):
 
@@ -103,15 +104,30 @@ class CLTrainer(Trainer):
 
         def batcher(params, batch, max_length=77):
             sentences = [' '.join(s) for s in batch]
-            batch = self.tokenizer.batch_encode_plus(
+            bertBatch = self.tokenizer.batch_encode_plus(
                 sentences,
                 return_tensors='pt',
                 padding=True,
                 max_length=max_length,
                 truncation=True,
             )
-            for k in batch:
-                batch[k] = batch[k].to(self.args.device)
+            batch = {}
+            for key in bertBatch.keys():
+                batch[key] = bertBatch[key].to(self.args.device)
+            
+            clipBatch = clipTokenizer.batch_encode_plus(
+                sentences,
+                return_tensors='pt',
+                padding=True,
+                max_length=max_length,
+                truncation=True,
+            )
+            for k in clipBatch:
+                clipBatch[k] = clipBatch[k].to(self.args.device)
+            
+            for key in clipBatch.keys():
+                batch['clip_'+key] = clipBatch[key]
+            
             with torch.no_grad():
                 outputs = self.model(**batch, output_hidden_states=True, return_dict=True, sent_emb=True)
                 pooler_output = outputs.pooler_output
@@ -204,7 +220,6 @@ class CLTrainer(Trainer):
                     run_id = trial.number
                 else:
                     from ray import tune
-
                     run_id = tune.get_trial_id()
                 run_name = self.hp_name(trial) if self.hp_name is not None else f"run-{run_id}"
                 output_dir = os.path.join(self.args.output_dir, run_name, checkpoint_folder)

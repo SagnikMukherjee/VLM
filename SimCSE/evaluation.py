@@ -7,7 +7,7 @@ from prettytable import PrettyTable
 import torch
 import transformers
 from transformers import AutoModel, AutoTokenizer, CLIPTokenizer, CLIPModel, AutoConfig
-from simcse.models import RobertaForCL
+from simcse.models import RobertaForCL, ensemble
 from train import ModelArguments
 from simcse.models import BertForCL
 
@@ -54,12 +54,21 @@ def main():
     
     # Load transformers' model checkpoint
     
-    if 'clip' in args.model_name_or_path:
-        tokenizer = CLIPTokenizer.from_pretrained(args.model_name_or_path)
-        model = CLIPModel.from_pretrained(args.model_name_or_path).text_model
-    else :
-        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
-        model = AutoModel.from_pretrained(args.model_name_or_path)
+    # if 'clip' in args.model_name_or_path:
+    #     tokenizer = CLIPTokenizer.from_pretrained(args.model_name_or_path)
+    #     model = CLIPModel.from_pretrained(args.model_name_or_path).text_model
+    # else :
+    #     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
+    #     model = AutoModel.from_pretrained(args.model_name_or_path)
+    config = AutoConfig.from_pretrained('bert-base-uncased')
+    args.pooler_type='cls'
+    args.temp=0.5
+    model = ensemble(config=config, model_args=args)
+    model.load_state_dict(torch.load(args.model_name_or_path))
+    bertTokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
+    clipTokenizer = CLIPTokenizer.from_pretrained('openai/clip-vit-base-patch32')
+    
+    
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
     
@@ -96,54 +105,58 @@ def main():
             batch = [[word.decode('utf-8') for word in s] for s in batch]
 
         sentences = [' '.join(s) for s in batch]
-
-        # Tokenization
-        if max_length is not None:
-            batch = tokenizer.batch_encode_plus(
+        bertBatch = bertTokenizer.batch_encode_plus(
                 sentences,
                 return_tensors='pt',
                 padding=True,
                 max_length=max_length,
-                truncation=True
+                truncation=True,
             )
-        else:
-            batch = tokenizer.batch_encode_plus(
-                sentences,
-                return_tensors='pt',
-                padding=True,
-            )
+        
+        clipBatch = clipTokenizer.batch_encode_plus(
+            sentences,
+            return_tensors='pt',
+            padding=True,
+            max_length=max_length,
+            truncation=True,
+        )
 
         # Move to the correct device
-        for k in batch:
-            batch[k] = batch[k].to(device)
+        for k in bertBatch:
+            bertBatch[k] = bertBatch[k].to(device)
+        for k in clipBatch:
+            clipBatch[k] = clipBatch[k].to(device)
         
         # Get raw embeddings
         with torch.no_grad():
-            outputs = model(**batch, output_hidden_states=True, return_dict=True)
-            last_hidden = outputs.last_hidden_state
-            pooler_output = outputs.pooler_output
-            hidden_states = outputs.hidden_states
+            bertOutputs = model.bert(**bertBatch, output_hidden_states=True, return_dict=True).pooler_output
+            clipOutputs = model.clip.text_model(**clipBatch, output_hidden_states=True, return_dict=True).pooler_output
+            outputs = torch.cat((bertOutputs,clipOutputs),dim=1)
+            return outputs.cpu()
+            # last_hidden = outputs.last_hidden_state
+            # pooler_output = outputs.pooler_output
+            # hidden_states = outputs.hidden_states
 
-        # Apply different poolers
-        if args.pooler == 'cls':
-            # There is a linear+activation layer after CLS representation
-            return pooler_output.cpu()
-        elif args.pooler == 'cls_before_pooler':
-            return last_hidden[:, 0].cpu()
-        elif args.pooler == "avg":
-            return ((last_hidden * batch['attention_mask'].unsqueeze(-1)).sum(1) / batch['attention_mask'].sum(-1).unsqueeze(-1)).cpu()
-        elif args.pooler == "avg_first_last":
-            first_hidden = hidden_states[0]
-            last_hidden = hidden_states[-1]
-            pooled_result = ((first_hidden + last_hidden) / 2.0 * batch['attention_mask'].unsqueeze(-1)).sum(1) / batch['attention_mask'].sum(-1).unsqueeze(-1)
-            return pooled_result.cpu()
-        elif args.pooler == "avg_top2":
-            second_last_hidden = hidden_states[-2]
-            last_hidden = hidden_states[-1]
-            pooled_result = ((last_hidden + second_last_hidden) / 2.0 * batch['attention_mask'].unsqueeze(-1)).sum(1) / batch['attention_mask'].sum(-1).unsqueeze(-1)
-            return pooled_result.cpu()
-        else:
-            raise NotImplementedError
+        # # Apply different poolers
+        # if args.pooler == 'cls':
+        #     # There is a linear+activation layer after CLS representation
+        #     return pooler_output.cpu()
+        # elif args.pooler == 'cls_before_pooler':
+        #     return last_hidden[:, 0].cpu()
+        # elif args.pooler == "avg":
+        #     return ((last_hidden * batch['attention_mask'].unsqueeze(-1)).sum(1) / batch['attention_mask'].sum(-1).unsqueeze(-1)).cpu()
+        # elif args.pooler == "avg_first_last":
+        #     first_hidden = hidden_states[0]
+        #     last_hidden = hidden_states[-1]
+        #     pooled_result = ((first_hidden + last_hidden) / 2.0 * batch['attention_mask'].unsqueeze(-1)).sum(1) / batch['attention_mask'].sum(-1).unsqueeze(-1)
+        #     return pooled_result.cpu()
+        # elif args.pooler == "avg_top2":
+        #     second_last_hidden = hidden_states[-2]
+        #     last_hidden = hidden_states[-1]
+        #     pooled_result = ((last_hidden + second_last_hidden) / 2.0 * batch['attention_mask'].unsqueeze(-1)).sum(1) / batch['attention_mask'].sum(-1).unsqueeze(-1)
+        #     return pooled_result.cpu()
+        # else:
+        #     raise NotImplementedError
 
     results = {}
 
