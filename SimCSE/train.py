@@ -36,7 +36,7 @@ from transformers.tokenization_utils_base import BatchEncoding, PaddingStrategy,
 from transformers.trainer_utils import is_main_process
 from transformers.data.data_collator import DataCollatorForLanguageModeling
 from transformers.file_utils import cached_property, torch_required, is_torch_available, is_torch_tpu_available
-from simcse.models import RobertaForCL, BertForCL
+from simcse.models import RobertaForCL, BertForCL, ensemble
 from simcse.trainers import CLTrainer
 
 logger = logging.getLogger(__name__)
@@ -338,49 +338,52 @@ def main():
         "revision": model_args.model_revision,
         "use_auth_token": True if model_args.use_auth_token else None,
     }
+    bertTokenizer = AutoTokenizer.from_pretrained('bert-base-uncased', **tokenizer_kwargs)
+    clipTokenizer = CLIPTokenizer.from_pretrained('openai/clip-vit-base-patch32', **tokenizer_kwargs)
     
-    if model_args.tokenizer_name:
-        tokenizer = AutoTokenizer.from_pretrained(model_args.tokenizer_name, **tokenizer_kwargs)
-    elif 'clip' in model_args.model_name_or_path:
-        tokenizer = CLIPTokenizer.from_pretrained(model_args.model_name_or_path, **tokenizer_kwargs)
-    elif model_args.model_name_or_path:
-        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path, **tokenizer_kwargs)
-    else:
-        raise ValueError(
-            "You are instantiating a new tokenizer from scratch. This is not supported by this script."
-            "You can do it from another script, save it, and load it from here, using --tokenizer_name."
-        )
+    # if model_args.tokenizer_name:
+    #     tokenizer = AutoTokenizer.from_pretrained(model_args.tokenizer_name, **tokenizer_kwargs)
+    # elif 'clip' in model_args.model_name_or_path:
+    #     tokenizer = CLIPTokenizer.from_pretrained(model_args.model_name_or_path, **tokenizer_kwargs)
+    # elif model_args.model_name_or_path:
+    #     tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path, **tokenizer_kwargs)
+    # else:
+    #     raise ValueError(
+    #         "You are instantiating a new tokenizer from scratch. This is not supported by this script."
+    #         "You can do it from another script, save it, and load it from here, using --tokenizer_name."
+    #     )
+    model = ensemble(config=config, model_args=model_args)
 
-    if model_args.model_name_or_path:
-        if 'clip' in model_args.model_name_or_path:
-            model = RobertaForCL.from_pretrained(
-                model_args.model_name_or_path,
-                from_tf=bool(".ckpt" in model_args.model_name_or_path),
-                config=config,
-                cache_dir=model_args.cache_dir,
-                revision=model_args.model_revision,
-                use_auth_token=True if model_args.use_auth_token else None,
-                model_args=model_args                  
-            )
-        elif 'bert' in model_args.model_name_or_path:
-            model = BertForCL.from_pretrained(
-                model_args.model_name_or_path,
-                from_tf=bool(".ckpt" in model_args.model_name_or_path),
-                config=config,
-                cache_dir=model_args.cache_dir,
-                revision=model_args.model_revision,
-                use_auth_token=True if model_args.use_auth_token else None,
-                model_args=model_args
-            )
-            if model_args.do_mlm:
-                pretrained_model = BertForPreTraining.from_pretrained(model_args.model_name_or_path)
-                model.lm_head.load_state_dict(pretrained_model.cls.predictions.state_dict())
-        else:
-            raise NotImplementedError
-    else:
-        raise NotImplementedError
-        logger.info("Training new model from scratch")
-        model = AutoModelForMaskedLM.from_config(config)
+    # if model_args.model_name_or_path:
+    #     if 'clip' in model_args.model_name_or_path:
+    #         model = RobertaForCL.from_pretrained(
+    #             model_args.model_name_or_path,
+    #             from_tf=bool(".ckpt" in model_args.model_name_or_path),
+    #             config=config,
+    #             cache_dir=model_args.cache_dir,
+    #             revision=model_args.model_revision,
+    #             use_auth_token=True if model_args.use_auth_token else None,
+    #             model_args=model_args                  
+    #         )
+    #     elif 'bert' in model_args.model_name_or_path:
+    #         model = BertForCL.from_pretrained(
+    #             model_args.model_name_or_path,
+    #             from_tf=bool(".ckpt" in model_args.model_name_or_path),
+    #             config=config,
+    #             cache_dir=model_args.cache_dir,
+    #             revision=model_args.model_revision,
+    #             use_auth_token=True if model_args.use_auth_token else None,
+    #             model_args=model_args
+    #         )
+    #         if model_args.do_mlm:
+    #             pretrained_model = BertForPreTraining.from_pretrained(model_args.model_name_or_path)
+    #             model.lm_head.load_state_dict(pretrained_model.cls.predictions.state_dict())
+    #     else:
+    #         raise NotImplementedError
+    # else:
+    #     raise NotImplementedError
+    #     logger.info("Training new model from scratch")
+    #     model = AutoModelForMaskedLM.from_config(config)
 
     # model.resize_token_embeddings(len(tokenizer))
 
@@ -411,7 +414,11 @@ def main():
         #   exceed the max length.
         # padding = max_length (when pad_to_max_length, for pressure test)
         #   All sentences are padded/truncated to data_args.max_seq_length.
+
+        # TODO(asgmukhe): edit this function to send bert and clip inputs both
+        # simply add things to features and they will be passed to model then edit model
         total = len(examples[sent0_cname])
+        features = {}
 
         # Avoid "None" fields 
         for idx in range(total):
@@ -429,20 +436,33 @@ def main():
                     examples[sent2_cname][idx] = " "
             sentences += examples[sent2_cname]
 
-        sent_features = tokenizer(
+        sent_features = bertTokenizer(
             sentences,
             max_length=data_args.max_seq_length,
             truncation=True,
-            padding="max_length" if data_args.pad_to_max_length else False,
+            padding="max_length",
         )
 
-        features = {}
+
         if sent2_cname is not None:
             for key in sent_features:
                 features[key] = [[sent_features[key][i], sent_features[key][i+total], sent_features[key][i+total*2]] for i in range(total)]
         else:
             for key in sent_features:
                 features[key] = [[sent_features[key][i], sent_features[key][i+total]] for i in range(total)]
+        sent_features = clipTokenizer(
+            sentences,
+            max_length=data_args.max_seq_length,
+            truncation=True,
+            padding="max_length",
+        )
+
+        if sent2_cname is not None:
+            for key in sent_features:
+                features['clip_'+key] = [[sent_features[key][i], sent_features[key][i+total], sent_features[key][i+total*2]] for i in range(total)]
+        else:
+            for key in sent_features:
+                features['clip_'+key] = [[sent_features[key][i], sent_features[key][i+total]] for i in range(total)]
             
         return features
 
@@ -467,7 +487,7 @@ def main():
         mlm_probability: float = data_args.mlm_probability
 
         def __call__(self, features: List[Dict[str, Union[List[int], List[List[int]], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
-            special_keys = ['input_ids', 'attention_mask', 'token_type_ids', 'mlm_input_ids', 'mlm_labels']
+            special_keys = ['input_ids', 'attention_mask', 'token_type_ids', 'clip_input_ids', 'clip_attention_mask', 'mlm_input_ids', 'mlm_labels']
             bs = len(features)
             if bs > 0:
                 num_sent = len(features[0]['input_ids'])
@@ -480,7 +500,7 @@ def main():
 
             batch = self.tokenizer.pad(
                 flat_features,
-                padding=self.padding,
+                padding=True,
                 max_length=self.max_length,
                 pad_to_multiple_of=self.pad_to_multiple_of,
                 return_tensors="pt",
@@ -533,13 +553,13 @@ def main():
             # The rest of the time (10% of the time) we keep the masked input tokens unchanged
             return inputs, labels
 
-    data_collator = default_data_collator if data_args.pad_to_max_length else OurDataCollatorWithPadding(tokenizer)
+    data_collator = default_data_collator if data_args.pad_to_max_length else OurDataCollatorWithPadding(bertTokenizer)
     training_args.dataloader_drop_last = True
     trainer = CLTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
-        tokenizer=tokenizer,
+        tokenizer=bertTokenizer,
         data_collator=data_collator,
     )
     trainer.model_args = model_args
